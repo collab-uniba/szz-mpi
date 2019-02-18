@@ -106,3 +106,6 @@ venv.bak/
 .idea/
 
 github_tokens.txt
+project-list.txt
+slugs/
+results/
