@@ -84,28 +84,19 @@ $ sh clone-projects.sh project-list.txt /path/to/git/clones/dir [/path/to/symlin
 
 ### Step 2: Extract issue and comments for projects
 **Notes**: 
-* if the `issues` and `comments` tables already contains pre-existing data, the script will add only new data, avoiding 
-adding duplicates;
-* in GitHub, pull requests are just a different kind of issues; in the database, you can distinguish an issue from a 
-pull request by the `pr_num` field, which is not `NULL` for PRs.
-* the project input file will be split into smaller files (to suppor resume, see next); they will be stored in the 
-`tmp/` sub-folder; the size of these temp files is the same of the number of GitHub access tokens entered in the file
-`github-api-tokens.txt`
-* the script supports resume on crashes; just relaunch, it will resume where it stopped. Make sure **not** to use the 
-`-r` switch, though.
+* This step is responsible to fetch Github using its API to retrieve issues and comments of a specific project.
 
 ```bash
-$ sh extract-data.sh (-r|-i) -f project-list.txt (-n N)
+$ sh extract-data.sh <slug> <tokens_file_path> <output_dir>
 ```  
 * ***Input***   
-    * `-i`: Mutually exclusive command, on the first run it will setup the temp folder content to support auto-resume on re-runs.
-    * `-r`: Mutually exclusive command, it will clean the temp folder where to store all the extracted issues; 
+    * `<slug>`: The slug (cloned in the previus step) to process.
+    * `<tokens_file_path>`: The Github API tokens to use in fetching issues and comments. 
     useful to start over from scratch. This option must be used alone. 
-    * `-f project-list.txt`: Specifies the txt file with the slugs (one per line) project repositories for which the 
-    issues reported on GitHub will be downloaded. Usually, it is the same from *Step 1*.
-    * `-n N`: Optional, specifies the size of chunks in which `file` will be split.
+    * `<output_dir>`: The directory in which `issues.csv` and `comments.csv` file will be stored.
+    issues reported on GitHub will be downloaded.
 * ***Output***
-    * All extracted issues are stored in the `issues` table of the database, which has the following structure:
+    * All extracted issues are stored in the `issues.csv` file, which has the following structure:
         * `slug`
         * `issue_id`
         * `issue_number`
@@ -118,8 +109,8 @@ $ sh extract-data.sh (-r|-i) -f project-list.txt (-n N)
         * `title`
         * `num_comments`
         * `labels`
-        * `pr_num` (is a number whenever the issue is a pull request)
-    * All comments extracted from issues and pull requests are stored in the `issue_comments` table, having the same str:
+        * `is_pl` (`True` if the issue is a Pull Request, `False`)
+    * All comments extracted from issues and pull requests are stored in the `comments.csv` file, having the same str:
         * `comment_id`                 
         * `slug`
         * `issue_id`
@@ -129,113 +120,130 @@ $ sh extract-data.sh (-r|-i) -f project-list.txt (-n N)
         * `user_github_id`
         * `user_login`
         * `body`
-    * `tmp/data/`
-        * Completed sub-files are deleted as completed; those remaining in there are those that generated an error; 
-        try to re-run the script;
-    * `extracted/`
-        * `done.txt` contains the list of the sub-files removed from `tmp/` that have been processed without errors;
-        there are also a bunch of csv files in here, one for the issues and one for the comments extracted from *each* 
-        of the sub-files and imported into the database (for debugging purposes, can be safely deleted).
-    
-### Step 3: Analysis of project developers, and commits plus their linked issues
+        
+### Step 3: Analysis of blamed commits
 **Notes:**
 
-* By default, the script runs 16 parallel threads. If you need to adjust this, edit the file `analyze-commits.sh` and 
-change the option `--thread=16` to your liking.
+* This script leverages the SZZ algorithm to mine bug-inducing commits from the repository.
+* You could run in MPI mode or in standard python mode. 
+* To run in MPI mode, use the following:
 
-```bash
-$ sh analyze-commits.sh /path/to/git/repos
-``` 
-
+    ```bash
+    $ sh szz.sh <num_mpi_process> <repo_path> <issue_file_path> <out_folder>
+    ``` 
+* In case of error running `mpiexec` command, you could specify the command path adding it as first paramether to the `szz.sh` command:
+    ```bash
+    $ sh szz.sh <mpi_exec_path> <num_mpi_process> <repo_path> <issue_file_path> <out_folder>
+    ```  
+* If you prefer to run in standard python mode, it is enough to omit the MPI required processes:
+    ```bash
+    $ sh szz.sh <repo_path> <issue_file_path> <out_folder>
+    ```  
 * ***Input***
-    * `/path/to/git/repos`: The path of a folder containing the local clones of the repositories whose commits will be 
-    blamed. Each repo folder must be in the format `owner_____name`, corresponding to the GitHub slug `owner/name`. 
-    This folder is typically the result of *Step 1*. Commits, instead, data are queried from the `commits` table.
-* ***Output***
-    * The following tables are created in the `multitasking` database:
-        * `users`: Info about developers
-        * `repos`: The list of project repositories processed
-        * `commits`: All the commits extracted from the projects' repositories
-        * `commit_files`: Size of changes (LOC added and deleted) to the files changed in a commit
-        * `issue_links`: List of issues that that were referenced in a commit (i.e., probably bug fixes) 
-
-### Step 4: Analysis of blamed commits
-**Notes:**
-
-* This script leverages the SZZ algorithm to mine bug-inducing commits from the repositories in the database.
-* By default, the script runs 16 parallel threads. If you need to adjust this, edit the file `blame-commits.sh` and 
-change the option `--thread=16` to your liking.
-
-```bash
-$ sh blame-commits.sh /path/to/git/repos
-``` 
-
-* ***Input***
-    * `/path/to/git/repos`: The path of a folder containing the local clones of the repositories whose commits will be 
+    * `<mpi_exec_path>`: Optional. The path where MPIEXEC command is located. 
+    * `<num_mpi_process>`:Optional. The number of MPI processes to run.
+    * `<repo_path>`: The path of a folder containing the local clones of the repositories whose commits will be 
     blamed. Each repo folder must be in the format `owner____name`, corresponding to the GitHub slug `owner/name`. 
-    This folder is typically the result of *Step 1*. Commits, instead, data are queried from the `commits` table.
+    This folder is typically the result of *Step 1*.
+    * `<issue_file_path>`: The file path of `issues.cvs` containing the issues extracted with the *Step 2*.
+    * `<out_folder>`: The directory in which to store the processing output.
 * ***Output***
-    * Bug-inducing commits are stored in the `blame` table, which has the following structure:
-        * `id` 
-        * `repo_id`
-        * `sha` (the sha of the current, bug-fixing commit)
-        * `path`
-        * `type` (file types: SRC=0, TEST=1, DOC=2, CFG_BUILD_OTHER=3)
-        * `blamed_sha` (the sha of the previous commit that is blamed for introducing a bug)
-        * `num_blamed_lines` (the number of lines blamed lines, which required changes to fix the bug)
-
-### Step 5: Developers' alias unmasking
+    * Commits details are stored in the `commits.csv` file, which has the following structure:
+        * `slug`: The repo from which commit are extracted. 
+        * `sha`: the commit sha.
+        * `timestamp`: UTC timestamp of commit.
+        * `author_id`: (custom) identificator of commit author.
+        * `commiter_id`: (custom) identificator of committer. 
+        * `message`: commit message.
+        * `num_parents`: number of commit parents.
+        * `num_additions`: number of additions in the commit.
+        * `num_deletions`: number of deletions in the commit.
+        * `num_files_changed`: number of files chaged by the commit.
+        * `files`: semicolon separated list of file involved in the commit.
+        * `src_loc_added`
+        * `src_loc_deleted`
+        * `src_file_touched`
+        * `src_files`
+    * Contributors details are stored in the file `contributos.csv`, which has the following structure:
+        * `slug`: the repo from which the contributors are extracted.
+        * `contributor_id`: (custom) identificator assigned to the controìibutor.
+        * `name`: the contributor name.
+        * `email`: the contributor email.
+    * Issue links details are stored in the `issue_links.csv` file. It contains the information about the link between issues and bug-fixing commit, identified by SZZ algorithm:
+        * `slug`: the repo identifier analyzed by SZZ.
+        * `commit_sha`: the identifier of the bug-fixing commit.
+        * `line_num`: number of lines touched to fix the commit.
+        * `issue_number`: number identified of the issue closed by the bug-fixing commit.
+        * `issue_is_pl`: True if the issue is a pull request, false otherwise.
+        * `delta_open`
+        * `delta_closed`
+    * Commit file details are stored in the `commit_files.csv`, which contains information about each file changed in commit:
+        * `slug`: is the repo identified.
+        * `sha`: is the identifier of the commit that which the file.
+        * `commit_file`: is the changed file name.
+        * `loc_ins`
+        * `loc_del`
+        * `lang`: file types: SRC=0, TEST=1, DOC=2, CFG_BUILD_OTHER=3
+    * Blames commit details are stored in the `blames_commit.csv` file, which cotains the detailed information about bug-fixing commit identified by SZZ algorithm and the link with the blamed commit:
+        * `slug`: is the repo identifier
+        * `bug_fixing_commit`: the identifier of bug-fixing commit.
+        * `path`: the file path involved in the commit.
+        * `type`: file types: SRC=0, TEST=1, DOC=2, CFG_BUILD_OTHER=3
+        * `blamed_commit`: the commit identified which is blamed to have introduced the bug.
+        * `num_blamed_lines`: the number of lines blamed.
+    * Blamed commit details are stored in the `blamed_commit.csv` file, which contains the details about the commit blamed to have introduced bugs from SZZ algorithm:
+        * `slug`: The repo from which commit are extracted. 
+        * `sha`: the commit sha.
+        * `timestamp`: UTC timestamp of commit.
+        * `author_id`: (custom) identificator of commit author.
+        * `commiter_id`: (custom) identificator of committer. 
+        * `message`: commit message.
+        * `num_parents`: number of commit parents.
+        * `num_additions`: number of additions in the commit.
+        * `num_deletions`: number of deletions in the commit.
+        * `num_files_changed`: number of files chaged by the commit.
+        * `files`: semicolon separated list of file involved in the commit.
+        * `src_loc_added`
+        * `src_loc_deleted`
+        * `src_file_touched`
+        * `src_files`
+         
+### Step 4: Developers' alias unmasking
 ```bash
-$ sh alias-unmask.sh
+$ sh alias-unmask.sh <input_dir> <out_dir>
 ``` 
 * ***Input***
-    * `None`: The List of developers' `user_id`, `name`, and `emails` is retrieved from the `User` table of the `multitasking` database.
+    * `<input_dir>`: The path where `*_contributrs.csv` files are stored, to use as input.
+    * `<out_dir>`: The path where to put the process result.
 * ***Output***
     * `./dim/dict/aliasMap.dict`: the alias map pickled to a binary file; it contains both the *certain* and the *probable* unmasked aliases (see below)
     * `./dim/idm_map.csv`: the alias map linearized as a CSV file; it contains both the certain and the probable unmasked aliases (see below)
     * `./dim/idm_log.csv`: the rules activated for each *certain* set of unmasked aliases
     * `./dim/idm_log.csv `: the rules activated for each *probable* set of unmasked aliases
 
-### Step 6: Extract cross-references 
+### Step 5: Extract cross-references 
 This step parses comments from issues/PRs and commits to match references to other projects as either owner/project#number
 (e.g., `rails/rails#123`) or owner/project@SHA (e.g., `bateman/dynkaas#70460b4b4aece5915caf5c68d12f560a9fe3e4`).
 ```bash
-$ sh extract-crossrefs.sh
+$ sh extract-crossrefs.sh <input_dir>
 ``` 
 * ***Input***
-    * `None`: Comments are extracted directly from tables `commits` and `issue_comments`
+    * `<input_dir>`: The directory to inspect to make cross references.
 * ***Output***
-    * Cross-references are stored in the table `cross_refs`, with the following structure:
+    * Cross-references are stored in the file `cross_references.csv`, with the following structure:
         * `id`
         * `from_slug`: the slug of the project where the cross-reference was found in
         * `ref`: the cross-reference itself
         * `comment_type`: indicate whether the reference was found in an issue/pr or in a commit message
 
-### Step 7: Export results as CSV file 
+### Step 6: Export results as CSV file 
 This step already includes developer aliases merging.
 ```bash
-$ sh export-results.sh 
+$ sh export-results.sh <input_dir> <out_dir>
 ```
 * ***Input***
-    * `None`: 
+    * `<input_dir>`: the directory to fetch as input.
+    * `<out_dir>`: the path where to store the export results.
 * ***Output***
     * `user_project_date_totalcommits.csv`: the file containing the daily contributions for the developers identified through the previous steps working on the given GitHub projects.
     * `user_language_date_totalcommits.csv`: the file containing daily contributions for the developers identified through the previous steps, plus the info on which programming language they used to work on the given GitHub projects.
-
-### Step 8: Compute metrics 
-
-**Notes:**
-
-* The files `user_project_date_totalcommits.csv` and `user_language_date_totalcommits.csv` from the previous step
-are implicitly used here to calculate metrics.
-%% TODO implement SLanguage metric%%
-%% fix issue when parsing user_project_date_totalcommits.csv %%
-
-```bash
-$ sh compute-metrics.sh week|month 
-``` 
-* ***Input***
-    * `week|month`: the unit of time to consider, chosen in `{week, month}`.
-* ***Output***  
-    * `user_week_aggr.csv` / `user_month_aggr.csv`: the file containing the metrics, aggregated by week or month.
-
