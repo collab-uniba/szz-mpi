@@ -39,7 +39,7 @@ class IssuesAndCommentExtractor(BaseGitHubThreadedExtractor):
             logger.debug("Looking for issue number %d", issues[i])
             issue = repo.get_issue(int(issues[i]))
             issue_data.append(self.__parse_issue(slug, issue))
-            comment_data += self.__parse_comments(slug, issue)
+            comment_data += IssuesAndCommentExtractor.__parse_comments(self, slug, issue)
 
     @jit
     def __parse_issue(self, slug, issue):
@@ -139,6 +139,7 @@ class IssuesAndCommentExtractor(BaseGitHubThreadedExtractor):
             if df_comments is not None:
                 df_comments.to_csv(os.path.join(out_dir, slug + "_comments.csv"), index=False)
 
+    @staticmethod
     def __parse_comments(self, slug, issue):
         comments = []
 
