@@ -160,7 +160,7 @@ class Szz:
                                             (delta closed <= 0)
                                         3) are not pull requests (is_pr == 1), just issues (is_pr == 0)
                                     """
-                                    if (delta_open > 0 >= delta_closed) and not issue.is_pl:
+                                    if (not closes_valid_issue) and (delta_open > 0 >= delta_closed) and not issue.is_pl:
                                         if not issue.labels:  # no labels is fine
                                             closes_valid_issue = True
                                         else:
