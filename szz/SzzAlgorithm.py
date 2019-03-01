@@ -136,12 +136,6 @@ class Szz:
                             for issue_id in issue_ids:
                                 issue = self.__issues_dict.get(issue_id)
                                 if issue:
-                                    if not issue.labels:  # no labels is fine
-                                        closes_valid_issue = True
-                                    else:
-                                        for label in issue.labels:
-                                            if label in self.__valid_labels:
-                                                closes_valid_issue = True
 
                                     delta_open = (
                                             authored_datetime - issue.created_at.replace(
