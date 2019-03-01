@@ -60,46 +60,6 @@ class Szz:
         self.__slug_unslashed = self.__slug.replace("/", "_")
         self.__contributors = {}
 
-    def __get_issue(self, issue_id: str, commit: CommitWrapper) -> Issue:
-        """
-        Valid issues are those
-        1) for which the associated commit was registered *after* the issue was open (delta open > 0)
-        2) for which the associated commit was registered *before or exactly when* the associated issue was closed
-        (delta closed <= 0)
-        3) are not pull requests (is_pr == 1), just issues (is_pr == 0)
-        """
-
-        issue: Issue = self.__issues_dict.get(issue_id)
-        if issue is not None:
-
-            authored_datetime = commit.authored_date
-
-            delta_open = (authored_datetime - issue.created_at.replace(tzinfo=pytz.utc)).total_seconds()
-            delta_closed = (authored_datetime - issue.closed_at.replace(tzinfo=pytz.utc)).total_seconds()
-
-            if (delta_open > 0 >= delta_closed) and not issue.is_pl:
-                return issue
-
-        return None
-
-    # def __closes_valid_issue(self, commit: CommitWrapper) -> bool:
-    #     # check for possible labels: if 'feature' or 'enhancement', ignore
-    #     # if no labels or labels are 'fix', 'bug-fix', retain
-    #     if commit.message is not None:
-    #         commit_issue_ids = commit.issue_ids
-    #         if len(commit_issue_ids) > 0:
-    #             for (line_num, issue_ids) in commit_issue_ids:
-    #                 for issue_id in issue_ids:
-    #                     issue = self.__issues_dict.get(issue_id)
-    #                     if issue:
-    #                         if not issue.labels:  # no labels is fine
-    #                             return True
-    #                         else:
-    #                             for label in issue.labels:
-    #                                 if label in self.__valid_labels:
-    #                                     return True
-    #     return False
-
     def __commit_to_metadata(self, commit: Commit):
         return [self.__slug, commit.sha, commit.timestamp, commit.author_id, commit.committer_id,
                 commit.message, commit.num_parents,
@@ -198,6 +158,22 @@ class Szz:
                                     issue_links.append(
                                         [self.__slug, commit.sha, line_num, issue.number, issue.is_pl, delta_open,
                                          delta_closed])
+                                    
+                                    """
+                                        Valid issues are those
+                                        1) for which the associated commit was registered *after* the issue was open (delta open > 0)
+                                        2) for which the associated commit was registered *before or exactly when* the associated issue was closed
+                                            (delta closed <= 0)
+                                        3) are not pull requests (is_pr == 1), just issues (is_pr == 0)
+                                    """
+                                    if (delta_open > 0 >= delta_closed) and not issue.is_pl:
+                                        if not issue.labels:  # no labels is fine
+                                            closes_valid_issue = True
+                                        else:
+                                            for label in issue.labels:
+                                                if label in self.__valid_labels:
+                                                    closes_valid_issue = True
+                                                    break
 
                 szz_commit = SzzCommit(sha=commit.sha, sha_parent=commit.parents[0].hex)
 
