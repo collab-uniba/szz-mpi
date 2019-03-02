@@ -39,8 +39,6 @@ log = loggingcfg.initialize_logger('SZZ-MPI', console_level=logging.INFO)
 
 
 class Szz:
-    basic_classifier: BasicFileTypeClassifier = None
-
     __COMMIT_COLUMNS = ["SLUG", "SHA", "TIMESTAMP", "AUTHOR_ID", "COMMITTER_ID", "MESSAGE",
                         "NUM_PARENTS",
                         "NUM_ADDITIONS", "NUM_DELETIONS", "NUM_FILES_CHANGED", "FILES",
@@ -53,12 +51,13 @@ class Szz:
         self.__output_folder = output_folder
         self.__issues_dict: Dict[int, Issue] = from_csv(issues_file_path)
         self.__valid_labels = valid_labels
-        self.basic_classifier = BasicFileTypeClassifier()
+        self.__basic_classifier = BasicFileTypeClassifier()
         self.__slug = utility.folder_name_to_slug(repo_path)
         self.__max_num_files_changed = max_num_files_changed
         self.__max_new_lines = max_new_lines
         self.__slug_unslashed = self.__slug.replace("/", "_")
         self.__contributors = {}
+        self.__mpi_enabled = mpisize > 1
 
     def __commit_to_metadata(self, commit: Commit):
         return [self.__slug, commit.sha, commit.timestamp, commit.author_id, commit.committer_id,
@@ -94,7 +93,7 @@ class Szz:
 
         # get info about changes to src files in the new  commit
         all_files, src_files, num_src_files_touched, src_loc_added, src_loc_deleted = \
-            CommitWrapper.get_src_changes(self.basic_classifier, diff)
+            CommitWrapper.get_src_changes(self.__basic_classifier, diff)
 
         db_commit = Commit(sha,
                            authored_datetime,
@@ -173,7 +172,7 @@ class Szz:
 
                 for patch in commit.diff(git_repo):
                     commit_file = os.path.basename(patch.delta.new_file.path)
-                    lang = self.basic_classifier.labelFile(commit_file)
+                    lang = self.__basic_classifier.labelFile(commit_file)
                     loc_ins = 0
                     loc_del = 0
 
@@ -191,10 +190,10 @@ class Szz:
                         continue
 
                     old_file = patch.delta.old_file.path
-                    label = self.basic_classifier.labelFile(old_file)
+                    label = self.__basic_classifier.labelFile(old_file)
 
                     # Ignore changes to documentation files
-                    if label == self.basic_classifier.DOC:
+                    if label == self.__basic_classifier.DOC:
                         continue
 
                     if closes_valid_issue:
@@ -214,13 +213,12 @@ class Szz:
                                     to line of comments)
                                     """
                                     if hl.origin == '-':
-                                        line_labels[hl.old_lineno] = self.basic_classifier.labelDiffLine(
+                                        line_labels[hl.old_lineno] = self.__basic_classifier.labelDiffLine(
                                             hl.content.replace('\r', '').replace('\n', ''))
 
                                 szz_hunk = SzzHunk(old_lines=hunk.old_lines, old_start=hunk.old_start, patch=szz_patch,
                                                    line_labels=line_labels)
                                 szz_hunks.append(szz_hunk)
-
 
         total_hunks = len(szz_hunks)
         log.info("Total hunks to process: %d", total_hunks)
@@ -320,7 +318,7 @@ class Szz:
 
                         # get info about changes to src files in the new blamed commit
                         all_files, src_files, num_src_files_touched, src_loc_added, src_loc_deleted = \
-                            CommitWrapper.get_src_changes(self.basic_classifier,
+                            CommitWrapper.get_src_changes(self.__basic_classifier,
                                                           blamed_commit.diff(git_repo))
 
                         blamed_commit = BlamedCommit(blamed_sha,
@@ -347,7 +345,7 @@ class Szz:
 
                 for line_num in range(bh.final_start_line_number,
                                       bh.final_start_line_number + bh.lines_in_hunk):
-                    if line_labels[line_num] == self.basic_classifier.CG_CODE:
+                    if line_labels[line_num] == self.__basic_classifier.CG_CODE:
                         blame_counter.setdefault(blamed_sha, 0)
                         blame_counter[blamed_sha] += 1
 
@@ -421,13 +419,12 @@ class Szz:
         return fill
 
     def run(self):
-        mpi_mode = mpisize > 1
         copy_path = True
         git_repo = self.__get_repo(copy_path)
         start = None
 
         if rank == 0:
-            log.info("Executing SZZ in MPI mode: " + str(mpi_mode))
+            log.info("Executing SZZ in MPI mode: " + str(self.__mpi_enabled))
             log.info("Processing repository at path %s", self.__repo_path)
             start = time.time()
             start_hunk_fetch = time.time()
@@ -436,7 +433,7 @@ class Szz:
         else:
             szz_hunks = None
 
-        if mpi_mode:
+        if self.__mpi_enabled:
             szz_hunks = comm.scatter(szz_hunks, root=0)
         else:
             szz_hunks = itertools.chain.from_iterable(szz_hunks)
@@ -446,9 +443,9 @@ class Szz:
         if szz_hunks is not None:
             blamed_commits, contributors = self.__fetch_blamed_commits(szz_hunks, git_repo)
 
-        received_data_blamed = blamed_commits
-        received_data_contributors = contributors
-        if mpi_mode:
+        received_data_blamed = [blamed_commits]
+        received_data_contributors = [contributors]
+        if self.__mpi_enabled:
             received_data_blamed = comm.gather(blamed_commits, root=0)
             received_data_contributors = comm.gather(contributors, root=0)
 
