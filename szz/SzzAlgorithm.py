@@ -451,11 +451,13 @@ class Szz:
         return fill
 
     def run(self):
+        mpi_mode = mpisize > 1
         copy_path = True
         git_repo = self.__get_repo(copy_path)
         start = None
 
         if rank == 0:
+            log.info("Executing SZZ in MPI mode: " + str(mpi_mode))
             log.info("Processing repository at path %s", self.__repo_path)
             start = time.time()
             start_hunk_fetch = time.time()
@@ -464,8 +466,10 @@ class Szz:
         else:
             szz_hunks = None
 
-        if mpisize > 1:
+        if mpi_mode:
             szz_hunks = comm.scatter(szz_hunks, root=0)
+        else:
+            szz_hunks = itertools.chain.from_iterable(szz_hunks)
 
         blamed_commits = []
         contributors = []
@@ -474,7 +478,7 @@ class Szz:
 
         received_data_blamed = blamed_commits
         received_data_contributors = contributors
-        if mpisize > 1:
+        if mpi_mode:
             received_data_blamed = comm.gather(blamed_commits, root=0)
             received_data_contributors = comm.gather(contributors, root=0)
 
