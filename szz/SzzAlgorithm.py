@@ -243,7 +243,7 @@ class Szz:
                               index=False)
         log.info("Saving issue_links to csv - COMPLETED")
 
-        return np.array_split(szz_hunks, min(mpisize, total_hunks))
+        return np.array_split(szz_hunks, mpisize)
 
     @staticmethod
     def __log_processing_time(self, message, start):
