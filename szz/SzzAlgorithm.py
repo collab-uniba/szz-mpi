@@ -1,8 +1,11 @@
 import os
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
 import sys
 import getopt
 
 import logging
+import math
 
 import numpy as np
 import pygit2
@@ -113,14 +116,25 @@ class Szz:
         return db_commit
 
     @staticmethod
-    def __fetch_hunks(self, git_repo: pygit2.Repository) -> List[SzzHunk]:
+    def __inspect_walk(self, git_repo: pygit2.Repository):
         szz_hunks = []
         issue_links = []
         commits = []
         contributors = {}
         commit_files = []
-        for c in git_repo.walk(git_repo[git_repo.head.target].id, pygit2.GIT_SORT_TIME):
-            commit = CommitWrapper(c)
+
+        walk = list(git_repo.walk(git_repo[git_repo.head.target].id, pygit2.GIT_SORT_TIME))
+        walk_size = len(walk)
+        dividend = math.ceil(walk_size / mpisize)
+        start_index = 0
+        if rank > 0:
+            start_index = rank * dividend
+        end_index = walk_size
+        if rank < mpisize - 1:
+            end_index = (rank + 1) * dividend
+
+        for i in range(start_index, end_index):
+            commit = CommitWrapper(walk[i])
 
             authored_datetime = commit.authored_date
 
@@ -151,7 +165,7 @@ class Szz:
                                     issue_links.append(
                                         [self.__slug, commit.sha, line_num, issue.number, issue.is_pl, delta_open,
                                          delta_closed])
-                                    
+
                                     """
                                         Valid issues are those
                                         1) for which the associated commit was registered *after* the issue was open (delta open > 0)
@@ -159,7 +173,8 @@ class Szz:
                                             (delta closed <= 0)
                                         3) are not pull requests (is_pr == 1), just issues (is_pr == 0)
                                     """
-                                    if (not closes_valid_issue) and (delta_open > 0 >= delta_closed) and not issue.is_pl:
+                                    if (not closes_valid_issue) and (
+                                            delta_open > 0 >= delta_closed) and not issue.is_pl:
                                         if not issue.labels:  # no labels is fine
                                             closes_valid_issue = True
                                         else:
@@ -219,11 +234,18 @@ class Szz:
                                 szz_hunk = SzzHunk(old_lines=hunk.old_lines, old_start=hunk.old_start, patch=szz_patch,
                                                    line_labels=line_labels)
                                 szz_hunks.append(szz_hunk)
+        contributors = [(key, value) for key, value in contributors.items()]
+        return szz_hunks, commits, contributors, commit_files, issue_links
 
-        total_hunks = len(szz_hunks)
-        log.info("Total hunks to process: %d", total_hunks)
+    @staticmethod
+    def __make_output(self, commits, contributors, commit_files, issue_links):
 
-        self.__contributors = {key: SzzContributor(key, value[0], value[1]) for key, value in contributors.items()}
+        commits = list(itertools.chain.from_iterable(commits))
+        contributors = list(itertools.chain.from_iterable(contributors))
+        commit_files = list(itertools.chain.from_iterable(commit_files))
+        issue_links = list(itertools.chain.from_iterable(issue_links))
+
+        self.__contributors = {contributor[0]: SzzContributor(contributor[0], contributor[1][0], contributor[1][1]) for contributor in contributors}
 
         log.info("Saving commits to csv")
         commits_df = pd.DataFrame(commits, columns=self.__COMMIT_COLUMNS)
@@ -231,8 +253,10 @@ class Szz:
         log.info("Saving commits to csv - COMPLETED")
 
         log.info("Saving commit files to csv")
-        commit_files_df = pd.DataFrame(commit_files, columns=["SLUG", "SHA", "COMMIT_FILE", "LOC_INS", "LOC_DEL", "LANG"])
-        commit_files_df.to_csv(os.path.join(self.__output_folder, self.__slug_unslashed + "_commit_files.csv"), index=False)
+        commit_files_df = pd.DataFrame(commit_files,
+                                       columns=["SLUG", "SHA", "COMMIT_FILE", "LOC_INS", "LOC_DEL", "LANG"])
+        commit_files_df.to_csv(os.path.join(self.__output_folder, self.__slug_unslashed + "_commit_files.csv"),
+                               index=False)
         log.info("Saving commit files to csv - COMPLETED")
 
         log.info("Saving issue_links to csv")
@@ -242,8 +266,6 @@ class Szz:
         issue_links_df.to_csv(os.path.join(self.__output_folder, self.__slug_unslashed + "_issue_links.csv"),
                               index=False)
         log.info("Saving issue_links to csv - COMPLETED")
-
-        return np.array_split(szz_hunks, mpisize)
 
     @staticmethod
     def __log_processing_time(self, message, start):
@@ -422,16 +444,29 @@ class Szz:
         copy_path = True
         git_repo = self.__get_repo(copy_path)
         start = None
+        start_hunk_fetch = None
 
         if rank == 0:
+            start = time.time()
             log.info("Executing SZZ in MPI mode: " + str(self.__mpi_enabled))
             log.info("Processing repository at path %s", self.__repo_path)
-            start = time.time()
             start_hunk_fetch = time.time()
-            szz_hunks = Szz.__fetch_hunks(self, git_repo)
-            Szz.__log_processing_time(self, "Hunk fetching time", start_hunk_fetch)
-        else:
-            szz_hunks = None
+
+        szz_hunks, commits, contributors, commit_files, issue_links = Szz.__inspect_walk(self, git_repo)
+
+        szz_hunks = comm.gather(szz_hunks, root=0)
+        commits = comm.gather(commits, root=0)
+        contributors = comm.gather(contributors, root=0)
+        commit_files = comm.gather(commit_files, root=0)
+        issue_links = comm.gather(issue_links, root=0)
+
+        if rank == 0:
+            szz_hunks = list(itertools.chain.from_iterable(szz_hunks))
+            total_hunks = len(szz_hunks)
+            log.info("Total hunks to process: %d", total_hunks)
+            szz_hunks = np.array_split(szz_hunks, mpisize)
+            Szz.__log_processing_time(self, "Hunks fetching time", start_hunk_fetch)
+            Szz.__make_output(self, commits, contributors, commit_files, issue_links)
 
         if self.__mpi_enabled:
             szz_hunks = comm.scatter(szz_hunks, root=0)
