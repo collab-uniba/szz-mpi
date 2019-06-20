@@ -14,6 +14,8 @@ def slug_to_folder_name(slug):
 def folder_name_to_slug(folder_name: str, join_value: str = '/'):
     if folder_name is None:
         return None
+    if folder_name.endswith("/"):
+        folder_name = folder_name[:-1]
     index = folder_name.rfind('/')
     if index > -1:
         folder_name = folder_name[index+1:]
@@ -22,7 +24,7 @@ def folder_name_to_slug(folder_name: str, join_value: str = '/'):
 
 def create_folder_if_not_exists(src_path: str, dest_path: str):
     if not os.path.isdir(dest_path):
-        shutil.copytree(src_path, dest_path)
+        shutil.copytree(src_path, dest_path, symlinks=True)
 
 
 def delete_folder_if_exists(path: str):

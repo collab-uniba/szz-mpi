@@ -1,5 +1,6 @@
 import os
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
+from os.path import expanduser
 
 import sys
 import getopt
@@ -38,6 +39,8 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 mpisize = comm.Get_size()
 
+temp_folder = None
+
 log = loggingcfg.initialize_logger('SZZ-MPI', console_level=logging.INFO)
 
 
@@ -50,6 +53,7 @@ class Szz:
 
     def __init__(self, repo_path: str, issues_file_path: str, output_folder: str, valid_labels: List[str],
                  max_num_files_changed=50, max_new_lines=200):
+        global temp_folder
         self.__repo_path = repo_path
         self.__output_folder = output_folder
         self.__issues_dict: Dict[int, Issue] = from_csv(issues_file_path)
@@ -61,6 +65,8 @@ class Szz:
         self.__slug_unslashed = self.__slug.replace("/", "_")
         self.__contributors = {}
         self.__mpi_enabled = mpisize > 1
+        temp_folder = os.path.join(expanduser("~"), "temp_" + self.__slug_unslashed)
+
 
     def __commit_to_metadata(self, commit: Commit):
         return [self.__slug, commit.sha, commit.timestamp, commit.author_id, commit.committer_id,
@@ -132,6 +138,8 @@ class Szz:
         end_index = walk_size
         if rank < mpisize - 1:
             end_index = (rank + 1) * dividend
+            if end_index > walk_size:
+                end_index = walk_size
 
         for i in range(start_index, end_index):
             commit = CommitWrapper(walk[i])
@@ -200,18 +208,22 @@ class Szz:
 
                     commit_files.append([self.__slug, commit.sha, commit_file, loc_ins, loc_del, lang])
 
-                    # skip changes to binary files
-                    if patch.delta.is_binary:
-                        continue
-
-                    old_file = patch.delta.old_file.path
-                    label = self.__basic_classifier.labelFile(old_file)
-
-                    # Ignore changes to documentation files
-                    if label == self.__basic_classifier.DOC:
-                        continue
-
                     if closes_valid_issue:
+                        # skip changes to test files
+                        if lang == self.__basic_classifier.TEST:
+                            continue
+
+                        # skip changes to binary files
+                        if patch.delta.is_binary:
+                            continue
+
+                        old_file = patch.delta.old_file.path
+                        label = self.__basic_classifier.labelFile(old_file)
+
+                        # Ignore changes to documentation files
+                        if label == self.__basic_classifier.DOC:
+                            continue
+
                         szz_patch = SzzPatch(old_file=old_file, label=label, commit=szz_commit)
 
                         for hunk in patch.hunks:
@@ -288,94 +300,101 @@ class Szz:
 
             line_labels = hunk.line_labels
 
-            for bh in git_repo.blame(hunk.patch.old_file, newest_commit=hunk.patch.commit.sha_parent,
-                                     min_line=hunk.old_start, max_line=hunk.old_start + hunk.old_lines - 1):
-                blamed_sha = str(bh.final_commit_id)
-                if blamed_sha not in blamed_commits:
-                    try:
-                        blamed_commit = CommitWrapper(git_repo.revparse_single(blamed_sha))
+            try:
+                for bh in git_repo.blame(hunk.patch.old_file, newest_commit=hunk.patch.commit.sha_parent,
+                                         min_line=hunk.old_start, max_line=hunk.old_start + hunk.old_lines - 1):
+                    blamed_sha = str(bh.final_commit_id)
+                    if blamed_sha not in blamed_commits:
+                        try:
+                            blamed_commit = CommitWrapper(git_repo.revparse_single(blamed_sha))
 
-                        blamed_parents = blamed_commit.parents
-                        blamed_num_parents = len(blamed_parents)
+                            blamed_parents = blamed_commit.parents
+                            blamed_num_parents = len(blamed_parents)
 
-                        if not blamed_num_parents:
-                            ins = None
-                            dels = None
-                            num_files = None
-                        else:
-                            blamed_diff = blamed_commit.diff(git_repo)
-                            ins = blamed_diff.stats.insertions
-                            dels = blamed_diff.stats.deletions
-                            num_files = blamed_diff.stats.files_changed
+                            if not blamed_num_parents:
+                                ins = None
+                                dels = None
+                                num_files = None
+                            else:
+                                blamed_diff = blamed_commit.diff(git_repo)
+                                ins = blamed_diff.stats.insertions
+                                dels = blamed_diff.stats.deletions
+                                num_files = blamed_diff.stats.files_changed
 
-                        if num_files is None or num_files >= self.__max_num_files_changed:
-                            continue
+                            if num_files is None or num_files >= self.__max_num_files_changed:
+                                continue
 
-                        if ins and ins >= self.__max_new_lines:
-                            continue
+                            if ins and ins >= self.__max_new_lines:
+                                continue
 
-                        blamed_authored_datetime = blamed_commit.authored_date
+                            blamed_authored_datetime = blamed_commit.authored_date
 
-                        (blamed_author_name,
-                         blamed_author_email) = blamed_commit.author
-                        (blamed_author_name_l, blamed_author_email_l) = (
-                            blamed_author_name.lower(), blamed_author_email.lower())
+                            (blamed_author_name,
+                             blamed_author_email) = blamed_commit.author
+                            (blamed_author_name_l, blamed_author_email_l) = (
+                                blamed_author_name.lower(), blamed_author_email.lower())
 
-                        (blamed_committer_name,
-                         blamed_committer_email) = blamed_commit.committer
-                        (blamed_committer_name_l, blamed_committer_email_l) = (
-                            blamed_committer_name.lower(), blamed_committer_email.lower())
+                            (blamed_committer_name,
+                             blamed_committer_email) = blamed_commit.committer
+                            (blamed_committer_name_l, blamed_committer_email_l) = (
+                                blamed_committer_name.lower(), blamed_committer_email.lower())
 
-                        if (blamed_author_name_l, blamed_author_email_l) not in contributors:
-                            blamed_author_id = Szz.__hash_values(self, blamed_author_name_l, blamed_author_email_l)
-                            contributors[blamed_author_id] = (blamed_author_name_l, blamed_author_email_l)
+                            if (blamed_author_name_l, blamed_author_email_l) not in contributors:
+                                blamed_author_id = Szz.__hash_values(self, blamed_author_name_l, blamed_author_email_l)
+                                contributors[blamed_author_id] = (blamed_author_name_l, blamed_author_email_l)
 
-                        if (blamed_committer_name_l, blamed_committer_email_l) not in contributors:
-                            blamed_committer_id = Szz.__hash_values(self, blamed_committer_name_l,
-                                                                    blamed_committer_email_l)
-                            contributors[blamed_committer_id] = (blamed_committer_name_l, blamed_committer_email_l)
+                            if (blamed_committer_name_l, blamed_committer_email_l) not in contributors:
+                                blamed_committer_id = Szz.__hash_values(self, blamed_committer_name_l,
+                                                                        blamed_committer_email_l)
+                                contributors[blamed_committer_id] = (blamed_committer_name_l, blamed_committer_email_l)
 
-                        blamed_message = blamed_commit.message
-                        blamed_first_msg_line = blamed_message.split('\n')[0]
+                            blamed_message = blamed_commit.message
+                            blamed_first_msg_line = blamed_message.split('\n')[0]
 
-                        # get info about changes to src files in the new blamed commit
-                        all_files, src_files, num_src_files_touched, src_loc_added, src_loc_deleted = \
-                            CommitWrapper.get_src_changes(self.__basic_classifier,
-                                                          blamed_commit.diff(git_repo))
+                            # get info about changes to src files in the new blamed commit
+                            all_files, src_files, num_src_files_touched, src_loc_added, src_loc_deleted = \
+                                CommitWrapper.get_src_changes(self.__basic_classifier,
+                                                              blamed_commit.diff(git_repo))
 
-                        blamed_commit = BlamedCommit(blamed_sha,
-                                                     blamed_authored_datetime,
-                                                     blamed_author_id,
-                                                     blamed_committer_id,
-                                                     blamed_first_msg_line,
-                                                     blamed_num_parents,
-                                                     ins,
-                                                     dels,
-                                                     num_files,
-                                                     all_files,
-                                                     src_loc_added,
-                                                     src_loc_deleted,
-                                                     num_src_files_touched,
-                                                     src_files)
+                            blamed_commit = BlamedCommit(blamed_sha,
+                                                         blamed_authored_datetime,
+                                                         blamed_author_id,
+                                                         blamed_committer_id,
+                                                         blamed_first_msg_line,
+                                                         blamed_num_parents,
+                                                         ins,
+                                                         dels,
+                                                         num_files,
+                                                         all_files,
+                                                         src_loc_added,
+                                                         src_loc_deleted,
+                                                         num_src_files_touched,
+                                                         src_files)
 
-                        blamed_commits[blamed_sha] = (blamed_commit, hunk)
+                            blamed_commits[blamed_sha] = (blamed_commit, hunk)
 
-                    except Exception as e:
-                        log.error(
-                            msg="{0}: revparse error {1}:\t{2}".format(self.__repo_path, blamed_sha, e))
-                        traceback.print_exc()
+                        except Exception as e:
+                            log.error(
+                                msg="{0}: revparse error {1}:\t{2}".format(self.__repo_path, blamed_sha, e))
+                            traceback.print_exc()
 
-                for line_num in range(bh.final_start_line_number,
-                                      bh.final_start_line_number + bh.lines_in_hunk):
-                    if line_labels[line_num] == self.__basic_classifier.CG_CODE:
-                        blame_counter.setdefault(blamed_sha, 0)
-                        blame_counter[blamed_sha] += 1
+                    for line_num in range(bh.final_start_line_number,
+                                          bh.final_start_line_number + bh.lines_in_hunk):
+                        if line_labels[line_num] == self.__basic_classifier.CG_CODE:
+                            blame_counter.setdefault(blamed_sha, 0)
+                            blame_counter[blamed_sha] += 1
+
+            except Exception as e:
+                log.error("Exception in blame.")
+                traceback.print_exc()
+                continue
 
         blames = []
 
         for blamed_sha, num_lines in blame_counter.items():
-            blamed_commit, hunk = blamed_commits[blamed_sha]
-            blames.append(Blame(hunk.patch.commit.sha, hunk.patch.old_file, hunk.patch.label, blamed_commit, num_lines))
+            blamed_commit, hunk = blamed_commits.get(blamed_sha)
+            if blamed_commit:
+                blames.append(Blame(hunk.patch.commit.sha, hunk.patch.old_file, hunk.patch.label, blamed_commit, num_lines))
 
         result_contributors = [SzzContributor(key, value[0], value[1]) for key, value in contributors.items()]
         log.info("Process %d give %d blames", rank, len(blames))
@@ -425,7 +444,8 @@ class Szz:
     def __get_repo(self, copy: bool = False) -> pygit2.Repository:
         git_path = self.__repo_path
         if copy and rank > 0:
-            git_path = "temp/" + self.__slug_unslashed + "/" + str(rank).zfill(Szz.__calculate_fill(self))
+            git_path = os.path.join(temp_folder, self.__slug_unslashed + "/" + str(rank).zfill(Szz.__calculate_fill(self)))
+            #git_path = os.path.join(expanduser("~"), self.__slug_unslashed + "_" + str(rank).zfill(Szz.__calculate_fill(self)))
             log.info("Copying repo in path: %s" % git_path)
             utility.create_folder_if_not_exists(self.__repo_path, git_path)
         return pygit2.Repository(git_path)
@@ -441,8 +461,7 @@ class Szz:
         return fill
 
     def run(self):
-        copy_path = True
-        git_repo = self.__get_repo(copy_path)
+        git_repo = self.__get_repo(self.__mpi_enabled)
         start = None
         start_hunk_fetch = None
 
@@ -486,10 +505,9 @@ class Szz:
 
         if rank == 0:
             Szz.__log_processing_time(self, "Blamed commits. Total processing time", start)
-
             self.__export_csv(received_data_blamed, received_data_contributors)
-
-            utility.delete_folder_if_exists("temp")
+            if self.__mpi_enabled:
+                utility.delete_folder_if_exists(temp_folder)
 
 
 if __name__ == '__main__':
